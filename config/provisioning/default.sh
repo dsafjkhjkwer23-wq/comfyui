@@ -68,85 +68,55 @@ CONTROLNET_MODELS=(
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 
 function provisioning_start() {
-    if [[ ! -d /opt/environments/python ]]; then 
-        export MAMBA_BASE=true
-    fi
-    source /opt/ai-dock/etc/environment.sh
-    source /opt/ai-dock/bin/venv-set.sh comfyui
+    export WORKSPACE="${WORKSPACE:-/workspace}"
+    export COMFYUI_DIR="${WORKSPACE}/ComfyUI"
+
+    # ai-dock 전용이므로 Vast 이미지에서는 제거
+    # source /opt/ai-dock/etc/environment.sh
+    # source /opt/ai-dock/bin/venv-set.sh comfyui
 
     provisioning_print_header
     provisioning_get_apt_packages
     provisioning_get_nodes
     provisioning_get_pip_packages
-    
-    # 여기서부터 경로를 ComfyUI 기본 폴더로 직접 지정합니다 (1대1 매칭)
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/checkpoints" \
-        "${CHECKPOINT_MODELS[@]}"
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/diffusion_models" \
-        "${DIFFUSION_MODELS[@]}"
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/text_encoders" \
-        "${TEXT_ENCODER_MODELS[@]}"
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/vae" \
-        "${VAE_MODELS[@]}"
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/loras" \
-        "${LORA_MODELS[@]}"
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/controlnet" \
-        "${CONTROLNET_MODELS[@]}"
-    provisioning_get_models \
-        "${WORKSPACE}/ComfyUI/models/upscale_models" \
-        "${UPSCALE_MODELS[@]}"
+
+    provisioning_get_models "${COMFYUI_DIR}/models/checkpoints" "${CHECKPOINT_MODELS[@]}"
+    provisioning_get_models "${COMFYUI_DIR}/models/diffusion_models" "${DIFFUSION_MODELS[@]}"
+    provisioning_get_models "${COMFYUI_DIR}/models/text_encoders" "${TEXT_ENCODER_MODELS[@]}"
+    provisioning_get_models "${COMFYUI_DIR}/models/vae" "${VAE_MODELS[@]}"
+    provisioning_get_models "${COMFYUI_DIR}/models/loras" "${LORA_MODELS[@]}"
+    provisioning_get_models "${COMFYUI_DIR}/models/controlnet" "${CONTROLNET_MODELS[@]}"
+    provisioning_get_models "${COMFYUI_DIR}/models/upscale_models" "${UPSCALE_MODELS[@]}"
+
     provisioning_print_end
 }
 
 function pip_install() {
-    if [[ -z $MAMBA_BASE ]]; then
-            "$COMFYUI_VENV_PIP" install --no-cache-dir "$@"
-        else
-            micromamba run -n comfyui pip install --no-cache-dir "$@"
-        fi
-}
-
-function provisioning_get_apt_packages() {
-    if [[ -n $APT_PACKAGES ]]; then
-            sudo $APT_INSTALL ${APT_PACKAGES[@]}
-    fi
-}
-
-function provisioning_get_pip_packages() {
-    if [[ -n $PIP_PACKAGES ]]; then
-            pip_install ${PIP_PACKAGES[@]}
-    fi
+    python -m pip install --no-cache-dir "$@"
 }
 
 function provisioning_get_nodes() {
+    export WORKSPACE="${WORKSPACE:-/workspace}"
+    export COMFYUI_DIR="${WORKSPACE}/ComfyUI"
+
     for repo in "${NODES[@]}"; do
         dir="${repo##*/}"
-        path="/opt/ComfyUI/custom_nodes/${dir}"
+        path="${COMFYUI_DIR}/custom_nodes/${dir}"
         requirements="${path}/requirements.txt"
-        if [[ -d $path ]]; then
+
+        if [[ -d "$path" ]]; then
             if [[ ${AUTO_UPDATE,,} != "false" ]]; then
                 printf "Updating node: %s...\n" "${repo}"
                 ( cd "$path" && git pull )
-                if [[ -e $requirements ]]; then
-                   pip_install -r "$requirements"
-                fi
+                [[ -e "$requirements" ]] && pip_install -r "$requirements"
             fi
         else
             printf "Downloading node: %s...\n" "${repo}"
             git clone "${repo}" "${path}" --recursive
-            if [[ -e $requirements ]]; then
-                pip_install -r "${requirements}"
-            fi
+            [[ -e "$requirements" ]] && pip_install -r "$requirements"
         fi
     done
 }
-
 function provisioning_get_default_workflow() {
     if [[ -n $DEFAULT_WORKFLOW ]]; then
         workflow_json=$(curl -s "$DEFAULT_WORKFLOW")
