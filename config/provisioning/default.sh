@@ -102,6 +102,13 @@ DIFFUSION_MODELS=(
     "anima-base-v1.0.safetensors|https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors"
 )
 
+# The v5.5 workflow's Image Saver UNet loader expects this exact library path:
+#   models/diffusion_models/ANIMA/anima_baseV10.safetensors
+# It is the same Anima base v1.0 weight, saved under the workflow-facing alias.
+DIFFUSION_MODEL_ALIASES=(
+    "anima_baseV10.safetensors|https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors"
+)
+
 VAE_MODELS=(
     "qwen_image_vae.safetensors|https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/vae/qwen_image_vae.safetensors?download=true"
     # Optional resolver example; enable if needed after confirming file name:
@@ -130,7 +137,7 @@ ULTRALYTICS_BBOX_MODELS=(
 # Required support models for ANIMA v5.5 custom-node sections.
 # These are small/medium Hugging Face downloads and are safe to run during provisioning.
 CONTROLNET_SUPPORT_MODELS=(
-    "anima-lllite-inpainting-v1.safetensors|https://huggingface.co/kohya-ss/Anima-LLLite/resolve/main/anima-lllite-inpainting-v1.safetensors?download=true"
+    "anima-lllite-inpainting-v2.safetensors|https://huggingface.co/kohya-ss/Anima-LLLite/resolve/main/anima-lllite-inpainting-v2.safetensors?download=true"
 )
 
 SAM3_SUPPORT_MODELS=(
@@ -2912,6 +2919,7 @@ function download_models_to_dir() {
 function provisioning_get_models() {
     log "Downloading required ANIMA support models"
     download_models_to_dir "${COMFYUI_DIR}/models/controlnet" "${CONTROLNET_SUPPORT_MODELS[@]}"
+    download_models_to_dir "${COMFYUI_DIR}/models/diffusion_models/ANIMA" "${DIFFUSION_MODEL_ALIASES[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/checkpoints" "${SAM3_SUPPORT_MODELS[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/frame_interpolation" "${FRAME_INTERPOLATION_SUPPORT_MODELS[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/ultralytics/segm" "${ULTRALYTICS_SEGM_MODELS[@]}"
@@ -2960,8 +2968,8 @@ Recommended Vast Environment Variables:
   RUN_NODE_INSTALL_PY: true
 
 Bulk downloads:
-  - This default.sh downloads only required support models.
-  - Use Jupyter downloader notebook for base model/VAE/LoRA pack.
+  - This default.sh downloads required support models plus the workflow-facing Anima base alias.
+  - Use Jupyter downloader notebook for VAE/LoRA pack and any optional bulk models.
 
 Tokens:
   - HF_TOKEN can be set if Hugging Face requires it.
