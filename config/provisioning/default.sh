@@ -23,7 +23,8 @@ export COMFYUI_MANAGER_ALLOW_GIT_URL_INSTALL="${COMFYUI_MANAGER_ALLOW_GIT_URL_IN
 export COMFYUI_MANAGER_ALLOW_PIP_INSTALL="${COMFYUI_MANAGER_ALLOW_PIP_INSTALL:-true}"
 export COMFYUI_MANAGER_NETWORK_MODE="${COMFYUI_MANAGER_NETWORK_MODE:-public}"
 export COMFYUI_MANAGER_BYPASS_SSL="${COMFYUI_MANAGER_BYPASS_SSL:-False}"
-export RUN_NODE_INSTALL_PY="${RUN_NODE_INSTALL_PY:-true}"
+export RUN_NODE_INSTALL_PY="${RUN_NODE_INSTALL_PY:-false}"
+export SKIP_MODEL_DOWNLOADS="${SKIP_MODEL_DOWNLOADS:-true}"
 
 # aria2 tuning
 export ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
@@ -2907,6 +2908,11 @@ function download_models_to_dir_parallel() {
 }
 
 function provisioning_get_models() {
+    if [[ "${SKIP_MODEL_DOWNLOADS}" == "true" || "${SKIP_MODEL_DOWNLOADS}" == "1" || "${SKIP_MODEL_DOWNLOADS}" == "yes" ]]; then
+        log "Skipping model/LoRA downloads in provisioning. Use the Jupyter downloader notebook after the instance starts."
+        return 0
+    fi
+
     log "Downloading core models"
     download_models_to_dir "${COMFYUI_DIR}/models/text_encoders" "${TEXT_ENCODER_MODELS[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/diffusion_models" "${DIFFUSION_MODELS[@]}"
@@ -2942,8 +2948,12 @@ Recommended Vast Environment Variables:
   COMFYUI_MANAGER_SECURITY_LEVEL: weak
   COMFYUI_MANAGER_ALLOW_GIT_URL_INSTALL: true
   COMFYUI_MANAGER_ALLOW_PIP_INSTALL: true
-  HF_TOKEN: your_hf_token
-  CIVITAI_TOKEN: your_civitai_token
+  SKIP_MODEL_DOWNLOADS: true
+  RUN_NODE_INSTALL_PY: false
+
+Tokens:
+  - For this quick provisioning file, HF_TOKEN/CIVITAI_TOKEN are not required.
+  - Enter tokens inside the Jupyter downloader notebook with getpass instead.
 EOF_NOTE
 }
 
