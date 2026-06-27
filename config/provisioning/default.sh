@@ -2498,12 +2498,59 @@ function log() {
     printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
 }
 
-function pip_install() {
-    if command -v uv >/dev/null 2>&1; then
-        uv pip install --system "$@" || python -m pip install "$@"
-    else
-        python -m pip install "$@"
+function find_python_bin() {
+    local candidates=()
+
+    if [[ -n "${ACTIVE_VENV:-}" ]]; then
+        candidates+=("/venv/${ACTIVE_VENV}/bin/python" "/venv/${ACTIVE_VENV}/bin/python3")
     fi
+
+    candidates+=(
+        "/venv/main/bin/python"
+        "/venv/main/bin/python3"
+        "${COMFYUI_DIR}/.venv/bin/python"
+        "${COMFYUI_DIR}/venv/bin/python"
+        "/usr/local/bin/python"
+        "/usr/local/bin/python3"
+        "/usr/bin/python3"
+    )
+
+    local py
+    for py in "${candidates[@]}"; do
+        if [[ -x "$py" ]]; then
+            echo "$py"
+            return 0
+        fi
+    done
+
+    command -v python3 || command -v python || true
+}
+
+function pip_install() {
+    local py
+    py="$(find_python_bin)"
+
+    if [[ -z "$py" ]]; then
+        echo "WARNING: no Python executable found; skipping pip install: $*"
+        return 0
+    fi
+
+    echo "Using Python for pip: $py"
+
+    if "$py" -m pip --version >/dev/null 2>&1; then
+        "$py" -m pip install "$@" \
+            || "$py" -m pip install --break-system-packages "$@" \
+            || true
+        return 0
+    fi
+
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$py" "$@" || true
+        return 0
+    fi
+
+    echo "WARNING: pip/uv unavailable for Python $py; skipping pip install: $*"
+    return 0
 }
 
 function provisioning_get_apt_packages() {
@@ -2567,14 +2614,21 @@ function clone_or_update_node() {
 
     if [[ -f "${dest}/install.py" ]]; then
         log "Running install.py for ${name}"
-        (cd "$dest" && python install.py) || true
+        local py
+        py="$(find_python_bin)"
+        if [[ -n "$py" ]]; then
+            (cd "$dest" && "$py" install.py) || true
+        else
+            echo "WARNING: no Python found for ${name}/install.py"
+        fi
     fi
 }
 
 
 function resolve_manager_node_repos() {
     local query="$1"
-    local manager_dir="${COMFYUI_DIR}/custom_nodes/comfyui-manager"
+    local manager_dir="${COMFYUI_DIR}/custom_nodes/ComfyUI-Manager"
+    [[ -d "${manager_dir}" ]] || manager_dir="${COMFYUI_DIR}/custom_nodes/comfyui-manager"
     local node_list="${manager_dir}/custom-node-list.json"
 
     if [[ ! -f "${node_list}" ]]; then
