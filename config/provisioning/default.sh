@@ -7,7 +7,7 @@ set -Eeuo pipefail
 # - Manager security config: weak + git/pip install flags
 # - Custom nodes clone/update + requirements install
 # - LoRA Manager/RvTools optional lookup through ComfyUI-Manager DB
-# - Core models via aria2 + Civitai LoRA via parallel curl
+# - Core models + user LoRA pack download via aria2
 # - Workflow JSON is NOT embedded or installed; import/upload it manually in ComfyUI
 #
 # Docker Options example:
@@ -23,8 +23,8 @@ export COMFYUI_MANAGER_ALLOW_GIT_URL_INSTALL="${COMFYUI_MANAGER_ALLOW_GIT_URL_IN
 export COMFYUI_MANAGER_ALLOW_PIP_INSTALL="${COMFYUI_MANAGER_ALLOW_PIP_INSTALL:-true}"
 export COMFYUI_MANAGER_NETWORK_MODE="${COMFYUI_MANAGER_NETWORK_MODE:-public}"
 export COMFYUI_MANAGER_BYPASS_SSL="${COMFYUI_MANAGER_BYPASS_SSL:-False}"
-export RUN_NODE_INSTALL_PY="${RUN_NODE_INSTALL_PY:-false}"
-export SKIP_MODEL_DOWNLOADS="${SKIP_MODEL_DOWNLOADS:-true}"
+export RUN_NODE_INSTALL_PY="${RUN_NODE_INSTALL_PY:-true}"
+export SKIP_BULK_MODEL_DOWNLOADS="${SKIP_BULK_MODEL_DOWNLOADS:-true}"
 
 # aria2 tuning
 export ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
@@ -35,11 +35,6 @@ export ARIA2_MAX_TRIES="${ARIA2_MAX_TRIES:-5}"
 export ARIA2_RETRY_WAIT="${ARIA2_RETRY_WAIT:-5}"
 export ARIA2_TIMEOUT="${ARIA2_TIMEOUT:-60}"
 export ARIA2_CONNECT_TIMEOUT="${ARIA2_CONNECT_TIMEOUT:-30}"
-
-# Civitai tuning
-# Civitai signed B2 URLs often fail with aria2 multi-range downloads.
-# Keep each Civitai file as a single curl stream, but download several files in parallel.
-export CIVITAI_PARALLEL_DOWNLOADS="${CIVITAI_PARALLEL_DOWNLOADS:-4}"
 
 APT_PACKAGES=(
     git
@@ -130,6 +125,25 @@ ULTRALYTICS_BBOX_MODELS=(
     # This resolves the latest/primary file from the Civitai model page.
     # If it picks the wrong file, replace with a direct api/download modelVersion URL.
     "pussy_yolov8v.pt|civitai-model:1835837"
+)
+
+# Required support models for ANIMA v5.5 custom-node sections.
+# These are small/medium Hugging Face downloads and are safe to run during provisioning.
+CONTROLNET_SUPPORT_MODELS=(
+    "anima-lllite-inpainting-v1.safetensors|https://huggingface.co/kohya-ss/Anima-LLLite/resolve/main/anima-lllite-inpainting-v1.safetensors?download=true"
+)
+
+SAM3_SUPPORT_MODELS=(
+    "sam3.1_multiplex_fp16.safetensors|https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors?download=true"
+)
+
+FRAME_INTERPOLATION_SUPPORT_MODELS=(
+    "film_net_fp16.safetensors|https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/film_net_fp16.safetensors?download=true"
+    "rife_v4.25.safetensors|https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.25.safetensors?download=true"
+    "rife_v4.25_heavy.safetensors|https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.25_heavy.safetensors?download=true"
+    "rife_v4.25_lite.safetensors|https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.25_lite.safetensors?download=true"
+    "rife_v4.26.safetensors|https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26.safetensors?download=true"
+    "rife_v4.26_heavy.safetensors|https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26_heavy.safetensors?download=true"
 )
 
 # Format:
@@ -2504,12 +2518,59 @@ function log() {
     printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
 }
 
-function pip_install() {
-    if command -v uv >/dev/null 2>&1; then
-        uv pip install --system "$@" || python -m pip install "$@"
-    else
-        python -m pip install "$@"
+function find_python_bin() {
+    local candidates=()
+
+    if [[ -n "${ACTIVE_VENV:-}" ]]; then
+        candidates+=("/venv/${ACTIVE_VENV}/bin/python" "/venv/${ACTIVE_VENV}/bin/python3")
     fi
+
+    candidates+=(
+        "/venv/main/bin/python"
+        "/venv/main/bin/python3"
+        "${COMFYUI_DIR}/.venv/bin/python"
+        "${COMFYUI_DIR}/venv/bin/python"
+        "/usr/local/bin/python"
+        "/usr/local/bin/python3"
+        "/usr/bin/python3"
+    )
+
+    local py
+    for py in "${candidates[@]}"; do
+        if [[ -x "$py" ]]; then
+            echo "$py"
+            return 0
+        fi
+    done
+
+    command -v python3 || command -v python || true
+}
+
+function pip_install() {
+    local py
+    py="$(find_python_bin)"
+
+    if [[ -z "$py" ]]; then
+        echo "WARNING: no Python executable found; skipping pip install: $*" >&2
+        return 0
+    fi
+
+    echo "Using Python for pip: $py"
+
+    if "$py" -m pip --version >/dev/null 2>&1; then
+        "$py" -m pip install "$@" \
+            || "$py" -m pip install --break-system-packages "$@" \
+            || true
+        return 0
+    fi
+
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$py" "$@" || true
+        return 0
+    fi
+
+    echo "WARNING: pip/uv unavailable for Python $py; skipping pip install: $*" >&2
+    return 0
 }
 
 function provisioning_get_apt_packages() {
@@ -2573,14 +2634,21 @@ function clone_or_update_node() {
 
     if [[ -f "${dest}/install.py" ]]; then
         log "Running install.py for ${name}"
-        (cd "$dest" && python install.py) || true
+        local py
+        py="$(find_python_bin)"
+        if [[ -n "$py" ]]; then
+            (cd "$dest" && "$py" install.py) || true
+        else
+            echo "WARNING: no Python found for ${name}/install.py"
+        fi
     fi
 }
 
 
 function resolve_manager_node_repos() {
     local query="$1"
-    local manager_dir="${COMFYUI_DIR}/custom_nodes/comfyui-manager"
+    local manager_dir="${COMFYUI_DIR}/custom_nodes/ComfyUI-Manager"
+    [[ -d "${manager_dir}" ]] || manager_dir="${COMFYUI_DIR}/custom_nodes/comfyui-manager"
     local node_list="${manager_dir}/custom-node-list.json"
 
     if [[ ! -f "${node_list}" ]]; then
@@ -2777,34 +2845,6 @@ function resolve_civitai_page_url() {
     fi
 }
 
-function download_civitai_with_curl() {
-    local dest_dir="$1"
-    local filename="$2"
-    local url="$3"
-    local outfile="${dest_dir}/${filename}"
-    local tmpfile="${outfile}.part"
-
-    rm -f "$tmpfile"
-
-    # Civitai redirects to a short-lived b2.civitai.com signed URL.
-    # aria2 may send ranged/multi-connection requests and may also replay headers
-    # across redirects, which often causes systematic 403 responses from B2.
-    # Use a fresh single-stream curl request for Civitai instead.
-    curl \
-        -fL \
-        --retry "${ARIA2_MAX_TRIES}" \
-        --retry-delay "${ARIA2_RETRY_WAIT}" \
-        --retry-all-errors \
-        --connect-timeout "${ARIA2_CONNECT_TIMEOUT}" \
-        --progress-bar \
-        -o "$tmpfile" \
-        "$url" && mv "$tmpfile" "$outfile" && return 0
-
-    echo "WARNING: Civitai curl download failed: ${filename}" >&2
-    rm -f "$tmpfile"
-    return 0
-}
-
 function download_one() {
     local dest_dir="$1"
     local entry="$2"
@@ -2818,14 +2858,9 @@ function download_one() {
 
     mkdir -p "$dest_dir"
 
-    if [[ -s "${dest_dir}/${filename}" ]]; then
+    if [[ -f "${dest_dir}/${filename}" ]]; then
         echo "Already exists: ${dest_dir}/${filename}"
         return 0
-    fi
-
-    if [[ -f "${dest_dir}/${filename}" ]]; then
-        echo "Removing empty/incomplete file: ${dest_dir}/${filename}"
-        rm -f "${dest_dir}/${filename}"
     fi
 
     url="$(resolve_civitai_page_url "$filename" "$url")"
@@ -2834,18 +2869,15 @@ function download_one() {
     fi
     url="$(append_token_to_url "$url" "${CIVITAI_TOKEN:-}")"
 
-    log "Downloading ${filename}"
-
-    if [[ "$url" == *"civitai.com"* || "$url" == *"civitai.red"* ]]; then
-        download_civitai_with_curl "$dest_dir" "$filename" "$url"
-        return 0
-    fi
-
     local aria_headers=()
     if [[ "$url" == *"huggingface.co"* && -n "${HF_TOKEN:-}" ]]; then
         aria_headers+=(--header="Authorization: Bearer ${HF_TOKEN}")
     fi
+    if [[ "$url" == *"civitai.com"* && -n "${CIVITAI_TOKEN:-}" ]]; then
+        aria_headers+=(--header="Authorization: Bearer ${CIVITAI_TOKEN}")
+    fi
 
+    log "Downloading ${filename}"
     aria2c \
         --max-connection-per-server="${ARIA2_CONNECTIONS}" \
         --split="${ARIA2_SPLIT}" \
@@ -2877,39 +2909,16 @@ function download_models_to_dir() {
     done
 }
 
-function download_models_to_dir_parallel() {
-    local dest_dir="$1"
-    local parallel="$2"
-    shift 2
-    local arr=("$@")
-    local running=0
-
-    if ! [[ "$parallel" =~ ^[0-9]+$ ]] || (( parallel < 1 )); then
-        parallel=1
-    fi
-
-    log "Parallel download to ${dest_dir} with ${parallel} worker(s)"
-    mkdir -p "$dest_dir"
-
-    for entry in "${arr[@]}"; do
-        (
-            download_one "$dest_dir" "$entry"
-        ) &
-
-        running=$((running + 1))
-
-        if (( running >= parallel )); then
-            wait -n || true
-            running=$((running - 1))
-        fi
-    done
-
-    wait || true
-}
-
 function provisioning_get_models() {
-    if [[ "${SKIP_MODEL_DOWNLOADS}" == "true" || "${SKIP_MODEL_DOWNLOADS}" == "1" || "${SKIP_MODEL_DOWNLOADS}" == "yes" ]]; then
-        log "Skipping model/LoRA downloads in provisioning. Use the Jupyter downloader notebook after the instance starts."
+    log "Downloading required ANIMA support models"
+    download_models_to_dir "${COMFYUI_DIR}/models/controlnet" "${CONTROLNET_SUPPORT_MODELS[@]}"
+    download_models_to_dir "${COMFYUI_DIR}/models/checkpoints" "${SAM3_SUPPORT_MODELS[@]}"
+    download_models_to_dir "${COMFYUI_DIR}/models/frame_interpolation" "${FRAME_INTERPOLATION_SUPPORT_MODELS[@]}"
+    download_models_to_dir "${COMFYUI_DIR}/models/ultralytics/segm" "${ULTRALYTICS_SEGM_MODELS[@]}"
+
+    if [[ "${SKIP_BULK_MODEL_DOWNLOADS}" == "true" || "${SKIP_BULK_MODEL_DOWNLOADS}" == "1" || "${SKIP_BULK_MODEL_DOWNLOADS}" == "yes" ]]; then
+        log "Skipping bulk core/LoRA downloads. Use the Jupyter downloader notebook for base model, VAE, upscale model, utility LoRA, and user LoRA pack."
+        log "Manual if needed: ${COMFYUI_DIR}/models/ultralytics/bbox/pussy_yolov8v.pt (Civitai page/API previously returned 403)."
         return 0
     fi
 
@@ -2920,11 +2929,10 @@ function provisioning_get_models() {
     download_models_to_dir "${COMFYUI_DIR}/models/loras" "${LORA_UTIL_MODELS[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/upscale_models" "${UPSCALE_MODELS[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/upscale-models" "${UPSCALE_MODELS[@]}"
-    download_models_to_dir "${COMFYUI_DIR}/models/ultralytics/segm" "${ULTRALYTICS_SEGM_MODELS[@]}"
     download_models_to_dir "${COMFYUI_DIR}/models/ultralytics/bbox" "${ULTRALYTICS_BBOX_MODELS[@]}"
 
     log "Downloading user LoRA pack"
-    download_models_to_dir_parallel "${COMFYUI_DIR}/models/loras" "${CIVITAI_PARALLEL_DOWNLOADS}" "${LORA_MODELS[@]}"
+    download_models_to_dir "${COMFYUI_DIR}/models/loras" "${LORA_MODELS[@]}"
 }
 
 
@@ -2948,12 +2956,16 @@ Recommended Vast Environment Variables:
   COMFYUI_MANAGER_SECURITY_LEVEL: weak
   COMFYUI_MANAGER_ALLOW_GIT_URL_INSTALL: true
   COMFYUI_MANAGER_ALLOW_PIP_INSTALL: true
-  SKIP_MODEL_DOWNLOADS: true
-  RUN_NODE_INSTALL_PY: false
+  SKIP_BULK_MODEL_DOWNLOADS: true
+  RUN_NODE_INSTALL_PY: true
+
+Bulk downloads:
+  - This default.sh downloads only required support models.
+  - Use Jupyter downloader notebook for base model/VAE/LoRA pack.
 
 Tokens:
-  - For this quick provisioning file, HF_TOKEN/CIVITAI_TOKEN are not required.
-  - Enter tokens inside the Jupyter downloader notebook with getpass instead.
+  - HF_TOKEN can be set if Hugging Face requires it.
+  - CIVITAI_TOKEN is not required unless you set SKIP_BULK_MODEL_DOWNLOADS=false.
 EOF_NOTE
 }
 
