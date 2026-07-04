@@ -25,7 +25,7 @@ export ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
 export ARIA2_SPLIT="${ARIA2_SPLIT:-16}"
 export ARIA2_MIN_SPLIT_SIZE="${ARIA2_MIN_SPLIT_SIZE:-1M}"
 export INSTALL_SAGEATTENTION="${INSTALL_SAGEATTENTION:-1}"
-export INSTALL_EASYUSE_ANIMA="${INSTALL_EASYUSE_ANIMA:-0}"
+export INSTALL_EASYUSE_ANIMA="${INSTALL_EASYUSE_ANIMA:-1}"
 
 mkdir -p "${CUSTOM_NODES_DIR}"
 mkdir -p "${MODELS_DIR}/diffusion_models/ANIMA" \
@@ -76,13 +76,23 @@ hf_aria() {
     "${url}"
 }
 
+# Vast provisioning may run before the ComfyUI/Torch environment is fully ready.
+# Do not let an optional Torch probe abort model downloads.
+if [ -f /venv/main/bin/activate ]; then
+  # shellcheck disable=SC1091
+  . /venv/main/bin/activate || true
+fi
+
 log "GPU / CUDA check"
 nvidia-smi || true
-python - <<'PY'
-import torch
-print('torch:', torch.__version__)
-print('cuda:', torch.version.cuda)
-print('gpu:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA')
+python - <<'PY' || true
+try:
+    import torch
+    print('torch:', torch.__version__)
+    print('cuda:', torch.version.cuda)
+    print('gpu:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA')
+except Exception as e:
+    print('torch probe skipped:', repr(e))
 PY
 
 log "Install downloader/build tools"
@@ -113,7 +123,8 @@ fi
 log "Install SageAttention, optional but recommended for optimized benchmark"
 if [ "${INSTALL_SAGEATTENTION}" = "1" ]; then
   python -m pip install sageattention==2.2.0 --no-build-isolation || \
-  python -m pip install sageattention --no-build-isolation
+  python -m pip install sageattention --no-build-isolation || \
+  echo "WARNING: SageAttention install failed; continuing provisioning."
 fi
 
 log "Download official ANIMA support files, excluding bf16 diffusion model"
