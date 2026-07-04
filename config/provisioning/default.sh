@@ -2,82 +2,41 @@
 set -Eeuo pipefail
 
 # ============================================================
-# Vast.ai ComfyUI ANIMA benchmark provisioning
-# Goal: compare normal workflow vs optimized workflow on the same instance.
-# Downloads:
-#   - Official ANIMA support files only: Qwen text encoder + Qwen VAE
-#   - ANIMA INT8 diffusion models: rowwise + convrot
-# Installs:
-#   - Spectrum-KSampler
-#   - Anima Block Compile
-#   - Anima PiD
-# Optional:
-#   - SageAttention
-# Does NOT download official bf16 anima-base-v1.0.safetensors.
+# Minimal ANIMA benchmark provisioning for Vast.ai
+# Requested only:
+#   1) Download ANIMA support models except official bf16 diffusion:
+#      - qwen_3_06b_base.safetensors
+#      - qwen_image_vae.safetensors
+#   2) Download ANIMA INT8 diffusion models:
+#      - anima-base-v1.0-int8rowwise.safetensors
+#      - anima-base-v1.0-int8convrot.safetensors
+#   3) Install custom nodes:
+#      - ComfyUI-Spectrum-KSampler
+#      - ComfyUI-Anima-BlockCompile
+#      - ComfyUI-Anima-PiD
+#   4) Optional SageAttention install, non-fatal.
+# Nothing else.
 # ============================================================
 
 export WORKSPACE="${WORKSPACE:-/workspace}"
 export COMFY_ROOT="${COMFY_ROOT:-${WORKSPACE}/ComfyUI}"
-export CUSTOM_NODES_DIR="${COMFY_ROOT}/custom_nodes"
-export MODELS_DIR="${COMFY_ROOT}/models"
+CUSTOM_NODES_DIR="${COMFY_ROOT}/custom_nodes"
+MODELS_DIR="${COMFY_ROOT}/models"
 
-export ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
-export ARIA2_SPLIT="${ARIA2_SPLIT:-16}"
-export ARIA2_MIN_SPLIT_SIZE="${ARIA2_MIN_SPLIT_SIZE:-1M}"
-export INSTALL_SAGEATTENTION="${INSTALL_SAGEATTENTION:-1}"
-export INSTALL_EASYUSE_ANIMA="${INSTALL_EASYUSE_ANIMA:-1}"
+ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
+ARIA2_SPLIT="${ARIA2_SPLIT:-16}"
+ARIA2_MIN_SPLIT_SIZE="${ARIA2_MIN_SPLIT_SIZE:-1M}"
+INSTALL_SAGEATTENTION="${INSTALL_SAGEATTENTION:-1}"
 
 mkdir -p "${CUSTOM_NODES_DIR}"
-mkdir -p "${MODELS_DIR}/diffusion_models/ANIMA" \
-         "${MODELS_DIR}/text_encoders" \
+mkdir -p "${MODELS_DIR}/text_encoders" \
          "${MODELS_DIR}/vae" \
-         "${MODELS_DIR}/pid"
+         "${MODELS_DIR}/diffusion_models/ANIMA"
 
 log() { echo -e "\n== $* =="; }
+warn() { echo -e "\n[WARN] $*" >&2; }
 
-clone_or_update() {
-  local repo_url="$1"
-  local dst="$2"
-  if [ -d "${dst}/.git" ]; then
-    git -C "${dst}" pull --ff-only || git -C "${dst}" pull --rebase
-  else
-    git clone "${repo_url}" "${dst}"
-  fi
-}
-
-install_requirements_if_any() {
-  local dst="$1"
-  if [ -f "${dst}/requirements.txt" ]; then
-    python -m pip install -r "${dst}/requirements.txt"
-  fi
-  if [ -f "${dst}/pyproject.toml" ]; then
-    python -m pip install -e "${dst}"
-  fi
-}
-
-hf_aria() {
-  local url="$1"
-  local out_dir="$2"
-  local out_name="$3"
-  if [ -s "${out_dir}/${out_name}" ]; then
-    echo "exists: ${out_dir}/${out_name}"
-    return 0
-  fi
-  mkdir -p "${out_dir}"
-  aria2c \
-    -x "${ARIA2_CONNECTIONS}" \
-    -s "${ARIA2_SPLIT}" \
-    -k "${ARIA2_MIN_SPLIT_SIZE}" \
-    --continue=true \
-    --allow-overwrite=true \
-    --auto-file-renaming=false \
-    -d "${out_dir}" \
-    -o "${out_name}" \
-    "${url}"
-}
-
-# Vast provisioning may run before the ComfyUI/Torch environment is fully ready.
-# Do not let an optional Torch probe abort model downloads.
+# Use the ComfyUI venv when it exists, but do not fail if activation is unavailable.
 if [ -f /venv/main/bin/activate ]; then
   # shellcheck disable=SC1091
   . /venv/main/bin/activate || true
@@ -95,39 +54,65 @@ except Exception as e:
     print('torch probe skipped:', repr(e))
 PY
 
-log "Install downloader/build tools"
+log "Install minimal system tools"
 apt-get update -y
-apt-get install -y aria2 git curl ca-certificates build-essential ninja-build
-python -m pip install --upgrade pip setuptools wheel packaging ninja
+apt-get install -y git aria2 ca-certificates
 
-log "Install custom nodes: Spectrum, BlockCompile, PiD"
+clone_or_update() {
+  local repo_url="$1"
+  local dst="$2"
+  if [ -d "${dst}/.git" ]; then
+    git -C "${dst}" pull --ff-only || git -C "${dst}" pull --rebase
+  else
+    git clone "${repo_url}" "${dst}"
+  fi
+}
+
+install_requirements_only() {
+  local dst="$1"
+  if [ -f "${dst}/requirements.txt" ]; then
+    python -m pip install -r "${dst}/requirements.txt"
+  fi
+}
+
+hf_aria() {
+  local url="$1"
+  local out_dir="$2"
+  local out_name="$3"
+  mkdir -p "${out_dir}"
+  if [ -s "${out_dir}/${out_name}" ]; then
+    echo "exists: ${out_dir}/${out_name}"
+    return 0
+  fi
+
+  aria2c \
+    -x "${ARIA2_CONNECTIONS}" \
+    -s "${ARIA2_SPLIT}" \
+    -k "${ARIA2_MIN_SPLIT_SIZE}" \
+    --continue=true \
+    --max-tries=5 \
+    --retry-wait=5 \
+    --allow-overwrite=true \
+    --auto-file-renaming=false \
+    -d "${out_dir}" \
+    -o "${out_name}" \
+    "${url}"
+}
+
+log "Install requested custom nodes only"
 clone_or_update "https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler.git" \
   "${CUSTOM_NODES_DIR}/ComfyUI-Spectrum-KSampler"
-install_requirements_if_any "${CUSTOM_NODES_DIR}/ComfyUI-Spectrum-KSampler"
+install_requirements_only "${CUSTOM_NODES_DIR}/ComfyUI-Spectrum-KSampler"
 
 clone_or_update "https://github.com/sorryhyun/ComfyUI-Anima-BlockCompile.git" \
   "${CUSTOM_NODES_DIR}/ComfyUI-Anima-BlockCompile"
-install_requirements_if_any "${CUSTOM_NODES_DIR}/ComfyUI-Anima-BlockCompile"
+install_requirements_only "${CUSTOM_NODES_DIR}/ComfyUI-Anima-BlockCompile"
 
 clone_or_update "https://github.com/sorryhyun/ComfyUI-Anima-PiD.git" \
   "${CUSTOM_NODES_DIR}/ComfyUI-Anima-PiD"
-install_requirements_if_any "${CUSTOM_NODES_DIR}/ComfyUI-Anima-PiD"
+install_requirements_only "${CUSTOM_NODES_DIR}/ComfyUI-Anima-PiD"
 
-if [ "${INSTALL_EASYUSE_ANIMA}" = "1" ]; then
-  log "Install EasyUseAnima, optional"
-  clone_or_update "https://github.com/n0va39/ComfyUI-EasyUseAnima.git" \
-    "${CUSTOM_NODES_DIR}/ComfyUI-EasyUseAnima"
-  install_requirements_if_any "${CUSTOM_NODES_DIR}/ComfyUI-EasyUseAnima"
-fi
-
-log "Install SageAttention, optional but recommended for optimized benchmark"
-if [ "${INSTALL_SAGEATTENTION}" = "1" ]; then
-  python -m pip install sageattention==2.2.0 --no-build-isolation || \
-  python -m pip install sageattention --no-build-isolation || \
-  echo "WARNING: SageAttention install failed; continuing provisioning."
-fi
-
-log "Download official ANIMA support files, excluding bf16 diffusion model"
+log "Download requested ANIMA support models, excluding official bf16 diffusion model"
 hf_aria \
   "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/text_encoders/qwen_3_06b_base.safetensors?download=true" \
   "${MODELS_DIR}/text_encoders" \
@@ -138,7 +123,7 @@ hf_aria \
   "${MODELS_DIR}/vae" \
   "qwen_image_vae.safetensors"
 
-log "Download ANIMA INT8 diffusion models"
+log "Download requested ANIMA INT8 diffusion models"
 hf_aria \
   "https://huggingface.co/Bedovyy/Anima-INT8/resolve/main/anima-base-v1.0-int8rowwise.safetensors?download=true" \
   "${MODELS_DIR}/diffusion_models/ANIMA" \
@@ -149,29 +134,24 @@ hf_aria \
   "${MODELS_DIR}/diffusion_models/ANIMA" \
   "anima-base-v1.0-int8convrot.safetensors"
 
-log "Verify"
+log "Install SageAttention, optional and non-fatal"
+if [ "${INSTALL_SAGEATTENTION}" = "1" ]; then
+  python -m pip install sageattention==2.2.0 --no-build-isolation || \
+  warn "SageAttention install failed. Provisioning continues; install it manually later if needed."
+else
+  echo "INSTALL_SAGEATTENTION=0, skipped."
+fi
+
+log "Verify requested files"
 ls -lh "${MODELS_DIR}/text_encoders/qwen_3_06b_base.safetensors" || true
 ls -lh "${MODELS_DIR}/vae/qwen_image_vae.safetensors" || true
 ls -lh "${MODELS_DIR}/diffusion_models/ANIMA/"*int8*.safetensors || true
-ls -la "${CUSTOM_NODES_DIR}/ComfyUI-Spectrum-KSampler" | head
-ls -la "${CUSTOM_NODES_DIR}/ComfyUI-Anima-BlockCompile" | head
-ls -la "${CUSTOM_NODES_DIR}/ComfyUI-Anima-PiD" | head
-
-python - <<'PY'
-try:
-    import sageattention
-    print('sageattention: OK', getattr(sageattention, '__version__', 'unknown'))
-except Exception as e:
-    print('sageattention: not available or failed:', repr(e))
-PY
+ls -la "${CUSTOM_NODES_DIR}/ComfyUI-Spectrum-KSampler" | head || true
+ls -la "${CUSTOM_NODES_DIR}/ComfyUI-Anima-BlockCompile" | head || true
+ls -la "${CUSTOM_NODES_DIR}/ComfyUI-Anima-PiD" | head || true
 
 cat <<'EOF'
 
 DONE.
-Restart ComfyUI completely.
-Benchmark rule:
-  1) Same GPU instance
-  2) Same workflow except model/sampler/compile nodes
-  3) Same width/height/seed/steps/cfg/sampler/scheduler
-  4) Run 1 warm-up, then record 3 runs from ComfyUI console: "Prompt executed in ... seconds"
+Restart ComfyUI completely after provisioning.
 EOF
