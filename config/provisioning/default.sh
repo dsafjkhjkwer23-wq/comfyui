@@ -3,13 +3,17 @@ set -Eeuo pipefail
 
 # ============================================================
 # Vast.ai ComfyUI ANIMA provisioning: default.sh
-# FINAL_REV=2026-07-05-sam31-wheel-defaults
+# FINAL_REV=2026-07-05-cuda132-official-int8-ready
 #
-# - NO EasyUseAnima. Never install ComfyUI-EasyUseAnima here.
-# - Installs custom nodes required by attached ANIMA speed JSON + requested additions.
-# - Downloads ANIMA INT8 x2, Qwen text encoder, Qwen VAE, PiD QwenImage checkpoint.
-# - Downloads SAM3.1 multiplex fp16 checkpoint from Comfy-Org.
-# - SageAttention: installs prebuilt RTX 4090 / sm89 / Python 3.12 wheel from GitHub.
+# Target template:
+#   vastai/comfy:v0.27.0-cuda-13.2-py312
+#
+# Notes:
+# - NO EasyUseAnima.
+# - Removes CUDA 12.9 dev package install block.
+# - Keeps RTX 4090 / sm89 / Python 3.12 SageAttention wheel install.
+# - Installs ANIMA speed workflow custom nodes.
+# - Downloads ANIMA INT8 rowwise + convrot, Qwen text encoder, Qwen VAE, PiD, SAM3.1.
 # ============================================================
 
 export WORKSPACE="${WORKSPACE:-/workspace}"
@@ -39,7 +43,6 @@ strip_outer_quotes() {
 export SAGEATTENTION_WHEEL_URL="$(strip_outer_quotes "${SAGEATTENTION_WHEEL_URL:-https://raw.githubusercontent.com/dsafjkhjkwer23-wq/comfyui/main/config/wheels/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl}")"
 export INSTALL_SAGEATTENTION_WHEEL="$(strip_outer_quotes "${INSTALL_SAGEATTENTION_WHEEL:-1}")"
 
-# SAM3.1 checkpoint requested by user.
 export SAM_MODEL_URL="$(strip_outer_quotes "${SAM_MODEL_URL:-https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors?download=true}")"
 export SAM_MODEL_NAME="$(strip_outer_quotes "${SAM_MODEL_NAME:-sam3.1_multiplex_fp16.safetensors}")"
 
@@ -71,9 +74,9 @@ clone_or_update() {
   local dst="$2"
 
   if [ -d "${dst}/.git" ]; then
-    git -C "${dst}" pull --ff-only || git -C "${dst}" pull --rebase
+    git -C "${dst}" pull --ff-only || git -C "${dst}" pull --rebase || warn "git pull failed for ${dst}; continuing."
   else
-    git clone "${repo_url}" "${dst}"
+    git clone "${repo_url}" "${dst}" || warn "git clone failed for ${repo_url}; continuing."
   fi
 }
 
@@ -116,7 +119,7 @@ download_file() {
     --retry-wait=5 \
     -d "${out_dir}" \
     -o "${out_name}" \
-    "${url}"
+    "${url}" || warn "download failed: ${out_name}"
 }
 
 activate_venv
@@ -125,17 +128,15 @@ log "Install base tools"
 apt-get update -y
 
 apt-get install -y \
-  aria2 git curl ca-certificates build-essential ninja-build rsync
-
-apt-get install -y \
-  libcusparse-dev-12-9 \
-  cuda-libraries-dev-12-9 \
-  cuda-cudart-dev-12-9 \
-  libcublas-dev-12-9 || warn "CUDA dev header packages failed or unavailable; continuing."
+  aria2 git curl ca-certificates build-essential ninja-build rsync \
+  || warn "base apt packages failed; continuing."
 
 python -m pip install --upgrade pip setuptools wheel packaging ninja huggingface_hub
 
-log "GPU / Python check"
+log "Pin / verify comfy-kitchen for official INT8"
+python -m pip install -U comfy-kitchen==0.2.16 || warn "comfy-kitchen install failed; continuing."
+
+log "GPU / Python / backend check"
 nvidia-smi || true
 
 python - <<'PY'
@@ -317,6 +318,22 @@ ls -lh "${MODELS_DIR}/vae/qwen_image_vae.safetensors" || true
 ls -lh "${MODELS_DIR}/diffusion_models/ANIMA/"*int8*.safetensors || true
 ls -lh "${MODELS_DIR}/pid/"*qwenimage* 2>/dev/null || true
 ls -lh "${MODELS_DIR}/sams/"* 2>/dev/null || true
+
+log "Final backend smoke test"
+
+python - <<'PY'
+try:
+    import comfy.quant_ops
+    import comfy_kitchen as ck
+    import torch
+
+    print("torch:", torch.__version__)
+    print("torch cuda:", torch.version.cuda)
+    print("comfy_kitchen:", getattr(ck, "__version__", "unknown"))
+    print("backends:", ck.list_backends())
+except Exception as e:
+    print("backend smoke test failed:", repr(e))
+PY
 
 log "DONE"
 echo "Restart ComfyUI completely after provisioning."
