@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # ============================================================
 # Vast.ai ComfyUI ANIMA provisioning: default.sh
-# FINAL_REV=2026-07-05-cuda132-official-int8-ready
+# FINAL_REV=2026-07-12-cuda132-int8-lora-manager-lllite-final
 #
 # Target template:
 #   vastai/comfy:v0.27.0-cuda-13.2-py312
@@ -13,7 +13,9 @@ set -Eeuo pipefail
 # - Removes CUDA 12.9 dev package install block.
 # - Keeps RTX 4090 / sm89 / Python 3.12 SageAttention wheel install.
 # - Installs ANIMA speed workflow custom nodes.
-# - Downloads ANIMA INT8 rowwise + convrot, Qwen text encoder, Qwen VAE, PiD, SAM3.1.
+# - Adds rgthree slider/Power LoRA Loader, ControlNet LLLite, and LoRA Manager.
+# - Downloads ANIMA INT8 rowwise + convrot, official ANIMA Base v1.0,
+#   Civitai ANIMA Turbo, Qwen text encoder, Qwen VAE, PiD, and SAM3.1.
 # ============================================================
 
 export WORKSPACE="${WORKSPACE:-/workspace}"
@@ -46,13 +48,17 @@ export INSTALL_SAGEATTENTION_WHEEL="$(strip_outer_quotes "${INSTALL_SAGEATTENTIO
 export SAM_MODEL_URL="$(strip_outer_quotes "${SAM_MODEL_URL:-https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors?download=true}")"
 export SAM_MODEL_NAME="$(strip_outer_quotes "${SAM_MODEL_NAME:-sam3.1_multiplex_fp16.safetensors}")"
 
+# Optional. Used only for Civitai downloads.
+export CIVITAI_TOKEN="$(strip_outer_quotes "${CIVITAI_TOKEN:-}")"
+
 mkdir -p \
   "${CUSTOM_NODES_DIR}" \
   "${MODELS_DIR}/diffusion_models/ANIMA" \
   "${MODELS_DIR}/text_encoders" \
   "${MODELS_DIR}/vae" \
   "${MODELS_DIR}/pid" \
-  "${MODELS_DIR}/sams"
+  "${MODELS_DIR}/sams" \
+  "${MODELS_DIR}/loras/ANIMA"
 
 log() {
   echo -e "\n== $* =="
@@ -120,6 +126,45 @@ download_file() {
     -d "${out_dir}" \
     -o "${out_name}" \
     "${url}" || warn "download failed: ${out_name}"
+}
+
+download_civitai_file() {
+  local url="$1"
+  local out_dir="$2"
+  local out_name="$3"
+  local out_path="${out_dir}/${out_name}"
+  local part_path="${out_path}.part"
+  local auth_args=()
+
+  mkdir -p "${out_dir}"
+
+  if [ -s "${out_path}" ]; then
+    echo "exists: ${out_path}"
+    return 0
+  fi
+
+  if [ -n "${CIVITAI_TOKEN}" ]; then
+    auth_args=(-H "Authorization: Bearer ${CIVITAI_TOKEN}")
+  fi
+
+  if curl \
+    -L \
+    --fail \
+    --show-error \
+    --retry 8 \
+    --retry-delay 3 \
+    --retry-all-errors \
+    --connect-timeout 30 \
+    --continue-at - \
+    --user-agent "Mozilla/5.0" \
+    "${auth_args[@]}" \
+    --output "${part_path}" \
+    "${url}"; then
+    mv -f "${part_path}" "${out_path}"
+    ls -lh "${out_path}"
+  else
+    warn "Civitai download failed: ${out_name}"
+  fi
 }
 
 activate_venv
@@ -199,6 +244,27 @@ clone_or_update "https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git" \
   "${CUSTOM_NODES_DIR}/ComfyUI-Impact-Subpack"
 install_node_deps "${CUSTOM_NODES_DIR}/ComfyUI-Impact-Subpack"
 
+log "Install slider LoRA loader"
+
+clone_or_update "https://github.com/rgthree/rgthree-comfy.git" \
+  "${CUSTOM_NODES_DIR}/rgthree-comfy"
+install_node_deps "${CUSTOM_NODES_DIR}/rgthree-comfy"
+
+log "Install ControlNet LLLite"
+
+clone_or_update "https://github.com/kohya-ss/ControlNet-LLLite-ComfyUI.git" \
+  "${CUSTOM_NODES_DIR}/ControlNet-LLLite-ComfyUI"
+install_node_deps "${CUSTOM_NODES_DIR}/ControlNet-LLLite-ComfyUI"
+
+mkdir -p \
+  "${CUSTOM_NODES_DIR}/ControlNet-LLLite-ComfyUI/models"
+
+log "Install LoRA Manager"
+
+clone_or_update "https://github.com/willmiao/ComfyUI-Lora-Manager.git" \
+  "${CUSTOM_NODES_DIR}/ComfyUI-Lora-Manager"
+install_node_deps "${CUSTOM_NODES_DIR}/ComfyUI-Lora-Manager"
+
 log "Install SageAttention wheel for RTX 4090 / sm89 only"
 
 if [ "${INSTALL_SAGEATTENTION_WHEEL}" = "1" ]; then
@@ -261,6 +327,20 @@ download_file \
   "${MODELS_DIR}/diffusion_models/ANIMA" \
   "anima-base-v1.0-int8convrot.safetensors"
 
+log "Download official ANIMA Base v1.0"
+
+download_file \
+  "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors?download=true" \
+  "${MODELS_DIR}/diffusion_models/ANIMA" \
+  "anima-base-v1.0.safetensors"
+
+log "Download Civitai ANIMA Turbo"
+
+download_civitai_file \
+  "https://civitai.red/api/download/models/3108589?fileId=2988553" \
+  "${MODELS_DIR}/diffusion_models/ANIMA" \
+  "ANIMA_Turbo.safetensors"
+
 log "Download PiD QwenImage checkpoint"
 
 if [ ! -s "${MODELS_DIR}/pid/pid_qwenimage_2kto4k_4step.pth" ]; then
@@ -306,7 +386,10 @@ for d in \
   ComfyUI-Anima-PiD \
   ComfyUI-RvTools_v2 \
   ComfyUI-Impact-Pack \
-  ComfyUI-Impact-Subpack; do
+  ComfyUI-Impact-Subpack \
+  rgthree-comfy \
+  ControlNet-LLLite-ComfyUI \
+  ComfyUI-Lora-Manager; do
 
   test -d "${CUSTOM_NODES_DIR}/${d}" && echo "OK: ${d}" || echo "MISSING: ${d}"
 done
@@ -316,6 +399,8 @@ log "Verify requested model files"
 ls -lh "${MODELS_DIR}/text_encoders/qwen_3_06b_base.safetensors" || true
 ls -lh "${MODELS_DIR}/vae/qwen_image_vae.safetensors" || true
 ls -lh "${MODELS_DIR}/diffusion_models/ANIMA/"*int8*.safetensors || true
+ls -lh "${MODELS_DIR}/diffusion_models/ANIMA/anima-base-v1.0.safetensors" || true
+ls -lh "${MODELS_DIR}/diffusion_models/ANIMA/ANIMA_Turbo.safetensors" || true
 ls -lh "${MODELS_DIR}/pid/"*qwenimage* 2>/dev/null || true
 ls -lh "${MODELS_DIR}/sams/"* 2>/dev/null || true
 
